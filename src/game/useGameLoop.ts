@@ -1,6 +1,8 @@
 /**
  * Core game loop hook for the space arcade shooter.
  * Manages player, asteroids, lasers, enemies, power-ups, particles, scoring, difficulty.
+ * Accepts dynamic canvas dimensions for full responsiveness.
+ * Supports pause / resume / restart.
  */
 
 import { useRef, useEffect, useCallback, useState } from "react";
@@ -14,12 +16,10 @@ import {
 } from "./renderer";
 import { playLaserSound, playExplosionSound, playPowerUpSound, startAmbientMusic } from "./audio";
 
-const W = 600;
-const H = 700;
+const BASE_W = 600;
+const BASE_H = 700;
 const PW = 36;
 const PH = 40;
-const PLAYER_SPEED = 5;
-const LASER_SPEED = 8;
 const SHOT_COOLDOWN = 250;
 const RAPID_COOLDOWN = 100;
 const STAR_COUNT = 140;
@@ -27,10 +27,10 @@ const POWERUP_DURATION = 5000;
 
 // ─── Helpers ───
 
-function createStars(): Star[] {
+function createStars(w: number, h: number): Star[] {
   return Array.from({ length: STAR_COUNT }, () => ({
-    x: Math.random() * W,
-    y: Math.random() * H,
+    x: Math.random() * w,
+    y: Math.random() * h,
     size: Math.random() * 2 + 0.5,
     opacity: Math.random() * 0.7 + 0.3,
     twinkleSpeed: Math.random() * 3 + 1,
@@ -38,9 +38,9 @@ function createStars(): Star[] {
   }));
 }
 
-function defaultPlayer(): PlayerState {
+function defaultPlayer(w: number, h: number): PlayerState {
   return {
-    x: W / 2 - PW / 2, y: H - 80, width: PW, height: PH,
+    x: w / 2 - PW / 2, y: h - 80, width: PW, height: PH,
     lives: 3, shieldActive: false, shieldTimer: 0,
     rapidFireActive: false, rapidFireTimer: 0,
     slowMotionActive: false, slowMotionTimer: 0,
@@ -78,20 +78,26 @@ function circleRect(cx: number, cy: number, cr: number, rx: number, ry: number, 
 
 // ─── Hook ───
 
-export function useGameLoop(canvasRef: React.RefObject<HTMLCanvasElement | null>) {
+export function useGameLoop(
+  canvasRef: React.RefObject<HTMLCanvasElement | null>,
+  canvasWidth: number,
+  canvasHeight: number
+) {
   const [gameState, setGameState] = useState<GameState>("start");
+  const [paused, setPaused] = useState(false);
+  const pausedRef = useRef(false);
   const [score, setScore] = useState(0);
   const [lives, setLives] = useState(3);
   const [difficulty, setDifficulty] = useState(1);
 
-  const playerRef = useRef<PlayerState>(defaultPlayer());
+  const playerRef = useRef<PlayerState>(defaultPlayer(canvasWidth, canvasHeight));
   const asteroidsRef = useRef<Asteroid[]>([]);
   const lasersRef = useRef<Laser[]>([]);
   const powerUpsRef = useRef<PowerUp[]>([]);
   const enemiesRef = useRef<EnemyShip[]>([]);
   const enemyLasersRef = useRef<EnemyLaser[]>([]);
   const particlesRef = useRef<Particle[]>([]);
-  const starsRef = useRef<Star[]>(createStars());
+  const starsRef = useRef<Star[]>(createStars(canvasWidth, canvasHeight));
   const keysRef = useRef<Set<string>>(new Set());
   const scoreRef = useRef(0);
   const diffRef = useRef(1);
@@ -100,8 +106,40 @@ export function useGameLoop(canvasRef: React.RefObject<HTMLCanvasElement | null>
   const lastEnemySpawnRef = useRef(0);
   const gsRef = useRef<GameState>("start");
   const ambientStopRef = useRef<(() => void) | null>(null);
+  // Store latest dimensions in refs so loop always uses current values
+  const wRef = useRef(canvasWidth);
+  const hRef = useRef(canvasHeight);
+
+  // Sync dimension refs
+  useEffect(() => {
+    wRef.current = canvasWidth;
+    hRef.current = canvasHeight;
+    starsRef.current = createStars(canvasWidth, canvasHeight);
+  }, [canvasWidth, canvasHeight]);
 
   useEffect(() => { gsRef.current = gameState; }, [gameState]);
+
+  const pauseGame = useCallback(() => {
+    if (gsRef.current !== "playing") return;
+    pausedRef.current = true;
+    setPaused(true);
+  }, []);
+
+  const resumeGame = useCallback(() => {
+    pausedRef.current = false;
+    setPaused(false);
+  }, []);
+
+  const togglePause = useCallback(() => {
+    if (gsRef.current !== "playing") return;
+    if (pausedRef.current) {
+      pausedRef.current = false;
+      setPaused(false);
+    } else {
+      pausedRef.current = true;
+      setPaused(true);
+    }
+  }, []);
 
   // Key listeners
   useEffect(() => {
@@ -110,6 +148,11 @@ export function useGameLoop(canvasRef: React.RefObject<HTMLCanvasElement | null>
         e.preventDefault();
         keysRef.current.add(e.key);
       }
+      // Pause / resume via Escape or P
+      if ((e.key === "Escape" || e.key === "p" || e.key === "P") && gsRef.current === "playing") {
+        pausedRef.current = !pausedRef.current;
+        setPaused(pausedRef.current);
+      }
     };
     const up = (e: KeyboardEvent) => keysRef.current.delete(e.key);
     window.addEventListener("keydown", down);
@@ -117,14 +160,21 @@ export function useGameLoop(canvasRef: React.RefObject<HTMLCanvasElement | null>
     return () => { window.removeEventListener("keydown", down); window.removeEventListener("keyup", up); };
   }, []);
 
+  // Expose keysRef so touch controls outside the hook can simulate keypresses
+  const pressKey = useCallback((key: string) => { keysRef.current.add(key); }, []);
+  const releaseKey = useCallback((key: string) => { keysRef.current.delete(key); }, []);
+
   const startGame = useCallback(() => {
-    playerRef.current = defaultPlayer();
+    const W = wRef.current;
+    const H = hRef.current;
+    playerRef.current = defaultPlayer(W, H);
     asteroidsRef.current = [];
     lasersRef.current = [];
     powerUpsRef.current = [];
     enemiesRef.current = [];
     enemyLasersRef.current = [];
     particlesRef.current = [];
+    starsRef.current = createStars(W, H);
     scoreRef.current = 0;
     diffRef.current = 1;
     lastSpawnRef.current = 0;
@@ -133,8 +183,9 @@ export function useGameLoop(canvasRef: React.RefObject<HTMLCanvasElement | null>
     setLives(3);
     setDifficulty(1);
     setGameState("playing");
+    pausedRef.current = false;
+    setPaused(false);
 
-    // Start ambient music
     if (ambientStopRef.current) ambientStopRef.current();
     ambientStopRef.current = startAmbientMusic();
   }, []);
@@ -142,32 +193,57 @@ export function useGameLoop(canvasRef: React.RefObject<HTMLCanvasElement | null>
   // Cleanup ambient on unmount
   useEffect(() => () => { if (ambientStopRef.current) ambientStopRef.current(); }, []);
 
+  // Scale player speed proportionally to canvas size
+  const getPlayerSpeed = () => Math.max(4, (wRef.current / BASE_W) * 5);
+  const getLaserSpeed = () => Math.max(6, (hRef.current / BASE_H) * 8);
+
   // Main loop
   useEffect(() => {
     const canvas = canvasRef.current;
     if (!canvas) return;
     const ctx = canvas.getContext("2d");
     if (!ctx) return;
-    canvas.width = W;
-    canvas.height = H;
+    canvas.width = canvasWidth;
+    canvas.height = canvasHeight;
 
     let animId: number;
     let prevTime = 0;
 
     const loop = (timestamp: number) => {
       animId = requestAnimationFrame(loop);
-      const dt = Math.min(timestamp - (prevTime || timestamp), 33); // cap at ~30fps delta
-      prevTime = timestamp;
+      const dt = Math.min(timestamp - (prevTime || timestamp), 33);
       const time = timestamp / 1000;
+      const W = wRef.current;
+      const H = hRef.current;
 
       clearCanvas(ctx, W, H);
 
-      // Animate stars (always)
       const stars = starsRef.current;
-      stars.forEach(s => { s.y += s.speed; if (s.y > H) { s.y = 0; s.x = Math.random() * W; } });
+      // Only scroll stars when not paused
+      if (!pausedRef.current) {
+        prevTime = timestamp;
+        stars.forEach(s => { s.y += s.speed; if (s.y > H) { s.y = 0; s.x = Math.random() * W; } });
+      }
       drawStars(ctx, stars, time);
 
       if (gsRef.current !== "playing") return;
+
+      // Draw pause overlay and stop all logic when paused
+      if (pausedRef.current) {
+        // Redraw current game objects without updating them
+        lasersRef.current.forEach(l => drawLaser(ctx, l));
+        asteroidsRef.current.forEach(a => drawAsteroid(ctx, a));
+        powerUpsRef.current.forEach(pu => drawPowerUp(ctx, pu, time));
+        enemiesRef.current.forEach(e => drawEnemy(ctx, e, time));
+        enemyLasersRef.current.forEach(el => drawEnemyLaser(ctx, el));
+        drawParticles(ctx, particlesRef.current);
+        drawPlayer(ctx, playerRef.current, time);
+        drawHUD(ctx, W, scoreRef.current, playerRef.current.lives, diffRef.current, playerRef.current);
+        return;
+      }
+
+      const PLAYER_SPEED = getPlayerSpeed();
+      const LASER_SPEED = getLaserSpeed();
 
       const player = playerRef.current;
       const keys = keysRef.current;
@@ -254,7 +330,6 @@ export function useGameLoop(canvasRef: React.RefObject<HTMLCanvasElement | null>
         a.rotation += a.rotationSpeed;
         if (a.y > H + a.radius) { asteroids.splice(i, 1); continue; }
 
-        // Laser-asteroid collision
         for (let j = lasers.length - 1; j >= 0; j--) {
           const l = lasers[j];
           const dx = Math.abs(l.x - a.x);
@@ -264,12 +339,10 @@ export function useGameLoop(canvasRef: React.RefObject<HTMLCanvasElement | null>
             a.health--;
             spawnParticles(particles, a.x, a.y, "#ffaa44", 6);
             if (a.health <= 0) {
-              // Destroy asteroid
               asteroids.splice(i, 1);
               playExplosionSound(a.size === "large");
               spawnParticles(particles, a.x, a.y, "#ff8833", a.size === "large" ? 20 : 10);
 
-              // Split large/medium
               if (a.size === "large" || a.size === "medium") {
                 const childSize: AsteroidSize = a.size === "large" ? "medium" : "small";
                 const childCfg = ASTEROID_SIZES[childSize];
@@ -288,11 +361,9 @@ export function useGameLoop(canvasRef: React.RefObject<HTMLCanvasElement | null>
                 }
               }
 
-              // Score
               const pts = a.size === "large" ? 30 : a.size === "medium" ? 20 : 10;
               scoreRef.current += player.doubleScoreActive ? pts * 2 : pts;
 
-              // Chance to drop power-up (20%)
               if (Math.random() < 0.2) {
                 const types: PowerUpType[] = ["rapidfire", "shield", "slowmo", "doublescore"];
                 powerUps.push({
@@ -314,16 +385,13 @@ export function useGameLoop(canvasRef: React.RefObject<HTMLCanvasElement | null>
       for (let i = enemies.length - 1; i >= 0; i--) {
         const e = enemies[i];
         e.x += e.speed * e.direction * slowFactor;
-        // Remove if off-screen
         if ((e.direction === 1 && e.x > W + 60) || (e.direction === -1 && e.x < -60)) {
           enemies.splice(i, 1); continue;
         }
-        // Enemy shoots
         if (timestamp - e.lastShotTime > 1500) {
           e.lastShotTime = timestamp;
           eLasers.push({ id: idRef.current++, x: e.x + e.width / 2, y: e.y + e.height, speed: 4 });
         }
-        // Laser-enemy collision
         for (let j = lasers.length - 1; j >= 0; j--) {
           const l = lasers[j];
           if (l.x > e.x && l.x < e.x + e.width && l.y > e.y && l.y < e.y + e.height) {
@@ -345,7 +413,6 @@ export function useGameLoop(canvasRef: React.RefObject<HTMLCanvasElement | null>
       for (let i = eLasers.length - 1; i >= 0; i--) {
         eLasers[i].y += eLasers[i].speed * slowFactor;
         if (eLasers[i].y > H + 10) { eLasers.splice(i, 1); continue; }
-        // Hit player?
         const el = eLasers[i];
         if (el.x > player.x && el.x < player.x + player.width && el.y > player.y && el.y < player.y + player.height) {
           eLasers.splice(i, 1);
@@ -369,7 +436,6 @@ export function useGameLoop(canvasRef: React.RefObject<HTMLCanvasElement | null>
         const pu = powerUps[i];
         pu.y += pu.speed * slowFactor;
         if (pu.y > H + 20) { powerUps.splice(i, 1); continue; }
-        // Collect
         if (circleRect(pu.x, pu.y, pu.radius, player.x, player.y, player.width, player.height)) {
           powerUps.splice(i, 1);
           playPowerUpSound();
@@ -388,7 +454,6 @@ export function useGameLoop(canvasRef: React.RefObject<HTMLCanvasElement | null>
           if (player.shieldActive) {
             player.shieldActive = false;
             player.shieldTimer = 0;
-            // Destroy the asteroid
             const idx = asteroids.indexOf(a);
             if (idx !== -1) asteroids.splice(idx, 1);
             spawnParticles(particles, a.x, a.y, "#00ffcc", 15);
@@ -415,7 +480,7 @@ export function useGameLoop(canvasRef: React.RefObject<HTMLCanvasElement | null>
       for (let i = enemies.length - 1; i >= 0; i--) {
         const e = enemies[i];
         if (player.x < e.x + e.width && player.x + player.width > e.x &&
-            player.y < e.y + e.height && player.y + player.height > e.y) {
+          player.y < e.y + e.height && player.y + player.height > e.y) {
           if (player.shieldActive) {
             player.shieldActive = false; player.shieldTimer = 0;
             enemies.splice(i, 1);
@@ -473,7 +538,8 @@ export function useGameLoop(canvasRef: React.RefObject<HTMLCanvasElement | null>
 
     animId = requestAnimationFrame(loop);
     return () => cancelAnimationFrame(animId);
-  }, [canvasRef]);
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [canvasRef, canvasWidth, canvasHeight]);
 
-  return { gameState, score, lives, difficulty, startGame, canvasWidth: W, canvasHeight: H };
+  return { gameState, score, lives, difficulty, paused, startGame, pauseGame, resumeGame, togglePause, pressKey, releaseKey };
 }
